@@ -108,6 +108,9 @@
 ### RoleGuard
 - [ ] `canActivate` — check user role against route `data.allowedRoles`
 
+### GuestGuard
+- [ ] `canActivate` — check `AuthStore.isAuthenticated()`, redirect to `/` if already logged in (for login/register/forgot/reset pages)
+
 ---
 
 ## Shared Module (`src/app/shared/`)
@@ -149,10 +152,10 @@
   - [ ] `'checkout'` → lazy load `CheckoutComponent` (AuthGuard)
   - [ ] `'orders'` → lazy load `OrdersComponent` (AuthGuard)
   - [ ] `'account'` → lazy load `AccountComponent` (AuthGuard)
-  - [ ] `'login'` → lazy load `LoginComponent`
-  - [ ] `'register'` → lazy load `RegisterComponent`
-  - [ ] `'forgot-password'` → lazy load `ForgotPasswordComponent`
-  - [ ] `'reset-password'` → lazy load `ResetPasswordComponent`
+  - [ ] `'login'` → lazy load `LoginComponent` (GuestGuard)
+  - [ ] `'register'` → lazy load `RegisterComponent` (GuestGuard)
+  - [ ] `'forgot-password'` → lazy load `ForgotPasswordComponent` (GuestGuard)
+  - [ ] `'reset-password'` → lazy load `ResetPasswordComponent` (GuestGuard)
   - [ ] `'admin'` → lazy load `AdminComponent` + `admin.routes.ts` (AdminGuard)
   - [ ] `'**'` → `NotFoundComponent`
 
@@ -427,7 +430,7 @@
   - [ ] Render Card Element (card number, expiry, CVC)
   - [ ] Create payment intent on step entry → get client secret
 - [ ] "Pay {total}" button:
-  - [ ] Call `stripe.confirmCardPayment(clientSecret, { payment_method: { card } })`
+  - [ ] Call `stripe.confirmPayment(clientSecret, { payment_method: { card } })`
   - [ ] Loading state during confirmation
   - [ ] Handle errors: card declined, insufficient funds, etc.
   - [ ] On success: go to step 4
@@ -667,6 +670,7 @@
   - [ ] Inventory
   - [ ] Users
   - [ ] Reviews
+  - [ ] Coupons
 - [ ] Top bar: admin name, logout button, notification bell
 - [ ] Main content area: `<router-outlet>`
 - [ ] Responsive: sidebar collapses to hamburger menu on mobile
@@ -680,6 +684,7 @@
 - [ ] `'inventory'` → `AdminInventoryComponent`
 - [ ] `'users'` → `AdminUsersComponent`
 - [ ] `'reviews'` → `AdminReviewsComponent`
+- [ ] `'coupons'` → `AdminCouponsComponent`
 - [ ] All routes behind AdminGuard
 
 ### Shared Admin Components
@@ -916,6 +921,47 @@
 - [ ] Component test: stat cards render with mock data
 - [ ] Component test: date range change triggers re-fetch
 - [ ] Component test: charts render with data
+
+---
+
+## Feature: Admin Coupons
+
+### Component: `AdminCouponsComponent`
+- [ ] Data table of all coupons:
+  - [ ] Columns: code, type badge (percent / fixed), value, min order amount, used/max uses, expiry, status
+  - [ ] Filter tabs: All, Active, Expired
+  - [ ] Search by coupon code
+  - [ ] Sort by: code, value, expiry date
+  - [ ] Cursor pagination
+- [ ] Row actions:
+  - [ ] Edit → open edit dialog
+  - [ ] Delete → confirmation dialog, soft delete
+- [ ] "Create Coupon" button → open create form dialog
+
+### Coupon Form Dialog (`HlmDialog`)
+- [ ] Reactive form fields:
+  - [ ] Code (required, uppercase, alphanumeric, unique — validated on blur)
+  - [ ] Type select (percent / fixed)
+  - [ ] Value input (required, number; for percent: 1-100, for fixed: min 1)
+  - [ ] Min order amount input (optional, cents)
+  - [ ] Max uses input (optional, 0 = unlimited)
+  - [ ] Expires at datetime input (optional)
+- [ ] Create: `POST /api/v1/admin/coupons`
+- [ ] Edit: `PUT /api/v1/admin/coupons/:id` (code field disabled/read-only when editing)
+- [ ] Form validation: required fields, type-specific value constraints
+
+### State: `AdminCouponsStore`
+- [ ] `coupons` signal, `filter` signal, `cursor` signal, `isLoading` signal
+- [ ] Methods: `loadCoupons(filter)`, `createCoupon(data)`, `updateCoupon(id, data)`, `deleteCoupon(id)`
+
+### Admin Routes Update
+- [ ] `'coupons'` → `AdminCouponsComponent` (behind AdminGuard)
+
+### Tests
+- [ ] Component test: table renders with mock data
+- [ ] Component test: form validation (code uniqueness, value constraints)
+- [ ] Component test: create/edit/delete coupon flows
+- [ ] Component test: active/expired filter
 
 ---
 

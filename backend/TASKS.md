@@ -34,6 +34,7 @@
   - `internal/inventory/repository/` for `db/queries/inventory.sql`
   - `internal/user/repository/` for `db/queries/user.sql`
   - `internal/review/repository/` for `db/queries/review.sql`
+  - `internal/analytics/repository/` for `db/queries/analytics.sql`
 - [ ] Enable `emit_json_tags: true`, `emit_db_tags: true`
 - [ ] Set `output_db_value_as_pointers: false` (prefer value types)
 
@@ -101,12 +102,14 @@
   - [ ] `auth.NewService(authRepo, userRepo, redisClient, jwtConfig, emailService)`
   - [ ] `catalog.NewService(catalogRepo, s3Client, eventBus)`
   - [ ] `cart.NewService(cartRepo, inventoryService, redisClient, eventBus)`
+  - [ ] `coupon.NewService(cartRepo)` (coupon admin CRUD shares cart repository for coupon queries)
   - [ ] `order.NewService(orderRepo, cartService, paymentService, inventoryService, eventBus)`
   - [ ] `payment.NewService(paymentRepo, orderService, stripeClient, eventBus)`
   - [ ] `inventory.NewService(inventoryRepo, redisClient, eventBus)`
   - [ ] `user.NewService(userRepo, s3Client)`
   - [ ] `notification.NewService(emailClient, eventBus)`
   - [ ] `review.NewService(reviewRepo, orderService)`
+  - [ ] `analytics.NewService(analyticsRepo, orderRepo, productRepo)`
 - [ ] Initialize internal event bus (`eventbus.New()`) with typed event channels
 - [ ] Register all event handlers (cross-module subscriptions)
 
@@ -130,6 +133,8 @@
   - [ ] `inventory.RegisterRoutes(v1, inventoryService, authMiddleware)`
   - [ ] `user.RegisterRoutes(v1, userService, authMiddleware)`
   - [ ] `review.RegisterRoutes(v1, reviewService, authMiddleware)`
+  - [ ] `analytics.RegisterRoutes(v1, analyticsService, authMiddleware)`
+  - [ ] `coupon.RegisterRoutes(v1, couponService, authMiddleware)`
 - [ ] Register Stripe webhook route: `POST /api/v1/webhooks/stripe` (raw body, no JSON parsing)
 
 ### Graceful Shutdown
@@ -380,12 +385,13 @@
 ### sqlc Query Files
 - [ ] `auth.sql` — user CRUD, password update, email verification
 - [ ] `catalog.sql` — product CRUD, category tree, full-text search, variants
-- [ ] `cart.sql` — cart CRUD, cart items, coupon validation
+- [ ] `cart.sql` — cart CRUD, cart items, coupon CRUD, coupon validation
 - [ ] `order.sql` — order CRUD, order items, order events, idempotency
 - [ ] `payment.sql` — payment CRUD, gateway lookup
 - [ ] `inventory.sql` — stock levels, reservations, audit log
 - [ ] `user.sql` — profile, addresses, wishlist
 - [ ] `review.sql` — review CRUD, moderation, summaries
+- [ ] `analytics.sql` — revenue summary, orders by status, top products, sales by category
 - [ ] `notification.sql` — notifications, failed emails
 - [ ] Each file must use sqlc annotations: `-- name: QueryName :one`, `:many`, `:exec`, `:execresult`
 - [ ] Use `sqlc.narg()` for nullable parameters
@@ -550,6 +556,8 @@
     - [ ] `InventoryDepleted` — `VariantID`
     - [ ] `InventoryLowStock` — `VariantID`, `Available`
     - [ ] `ReviewSubmitted` — `ReviewID`, `ProductID`, `UserID`
+    - [ ] `ReviewApproved` — `ReviewID`, `ProductID`
+    - [ ] `ReviewRejected` — `ReviewID`, `ProductID`, `Reason`
     - [ ] `PasswordResetRequested` — `UserID`, `Email`, `Token`
 - [ ] Create `bus.go` with event bus implementation:
   - [ ] `Bus` struct with typed channels per event type (Go generics)
@@ -1424,4 +1432,117 @@
   - [ ] Full review lifecycle: create → approve → visible in listing
   - [ ] Purchase verification: cannot review without delivered order
   - [ ] Unique constraint: second review from same user rejected
-  - [ ] Cache invalidation on approval
+   - [ ] Cache invalidation on approval
+
+---
+
+## internal/analytics — Admin Dashboard Metrics, Revenue Charts, KPIs
+
+### Standards & Conventions
+- **Gin:** Thin handlers. All endpoints require Admin role.
+- **Read-only:** Analytics module performs no mutations. Reads aggregated data from orders, payments, products.
+- **Caching:** Analytics results cached in Redis (TTL 30 min) to avoid repeated expensive queries.
+- **Date ranges:** All endpoints accept `period` param: `7d`, `30d`, `90d`, or custom `from`/`to` dates.
+
+### Types & DTOs
+- [ ] `AnalyticsSummary` — `TotalRevenue` (money.Money), `TotalOrders` (int64), `TotalCustomers` (int64), `AverageOrderValue` (money.Money), `ConversionRate` (float64, optional v1)
+- [ ] `RevenuePoint` — `Date` (string), `Revenue` (money.Money), `OrderCount` (int64)
+- [ ] `StatusDistribution` — `Status` (order status string), `Count` (int64)
+- [ ] `TopProduct` — `ProductID`, `ProductName`, `Slug`, `Revenue` (money.Money), `UnitsSold` (int64)
+- [ ] `CategoryBreakdown` — `CategoryID`, `CategoryName`, `Revenue` (money.Money), `Percentage` (float64)
+- [ ] `AnalyticsFilter` — `period` (string: 7d/30d/90d/custom), `from` (string, date), `to` (string, date)
+
+### Service Layer (`service.go`)
+- [ ] `GetSummary(ctx, filter) (*AnalyticsSummary, error)`:
+  - [ ] Aggregate total revenue, order count, customer count for period
+  - [ ] Compute AOV = total_revenue / total_orders
+  - [ ] Compute trend vs previous period of equal length
+- [ ] `GetRevenueChart(ctx, filter) ([]RevenuePoint, error)`:
+  - [ ] Group revenue by day/week/month depending on period length
+  - [ ] Return ordered time series
+- [ ] `GetOrdersByStatus(ctx, filter) ([]StatusDistribution, error)`:
+  - [ ] COUNT grouped by order status
+- [ ] `GetTopProducts(ctx, filter, limit) ([]TopProduct, error)`:
+  - [ ] JOIN order_items + orders + products
+  - [ ] SUM revenue per product, ORDER BY DESC, LIMIT
+  - [ ] Default limit: 10
+- [ ] `GetSalesByCategory(ctx, filter) ([]CategoryBreakdown, error)`:
+  - [ ] JOIN order_items → product_variants → products → categories
+  - [ ] SUM revenue per category, compute percentage of total
+
+### Handler Layer (`handler.go`)
+- [ ] `GET /api/v1/admin/analytics/summary` — require Admin, parse period param, call `GetSummary`
+- [ ] `GET /api/v1/admin/analytics/revenue` — require Admin, parse period/from/to, call `GetRevenueChart`
+- [ ] `GET /api/v1/admin/analytics/orders-by-status` — require Admin, call `GetOrdersByStatus`
+- [ ] `GET /api/v1/admin/analytics/top-products` — require Admin, parse limit (default 10, max 50), call `GetTopProducts`
+- [ ] `GET /api/v1/admin/analytics/sales-by-category` — require Admin, call `GetSalesByCategory`
+
+### Repository Layer (`repository/`)
+- [ ] `db/queries/analytics.sql`:
+  - [ ] `GetRevenueSummary` — SELECT SUM(total), COUNT(*) FROM orders WHERE paid status, filtered by date range
+  - [ ] `GetCustomerCount` — SELECT COUNT(*) FROM users WHERE created_at in range
+  - [ ] `GetRevenueTimeSeries` — SELECT DATE(created_at), SUM(total), COUNT(*) GROUP BY date, ordered
+  - [ ] `GetOrdersByStatus` — SELECT status, COUNT(*) GROUP BY status
+  - [ ] `GetTopProducts` — SELECT product_id, product_name, SUM(oi.unit_price * oi.quantity) as revenue, SUM(oi.quantity) as sold, GROUP BY, ORDER BY DESC, LIMIT
+  - [ ] `GetSalesByCategory` — SELECT category_id, category_name, SUM(revenue), GROUP BY, compute percentage
+  - [ ] All queries accept date range parameters via `sqlc.narg()`
+- [ ] Run `sqlc generate`
+
+### Caching
+- [ ] Cache all analytics responses in Redis with TTL 30 minutes
+- [ ] Cache keys: `analytics:summary:{period}`, `analytics:revenue:{period}`, etc.
+- [ ] Invalidate cache on report refresh (optional admin force-refresh param `?refresh=true`)
+
+### Tests
+- [ ] Unit tests:
+  - [ ] GetSummary: correct aggregates, empty data, date range filtering
+  - [ ] GetRevenueChart: correct grouping by day/week/month, sorted correctly
+  - [ ] GetTopProducts: correct ordering, respects limit, empty results
+  - [ ] GetSalesByCategory: correct percentages (sum to 100%), empty categories
+- [ ] Integration tests:
+  - [ ] Full analytics query with seeded test data
+   - [ ] Cache hit/miss behavior
+   - [ ] Date range boundary validation
+
+---
+
+## internal/coupon — Admin Coupon CRUD
+
+### Standards & Conventions
+- **Gin:** Thin handlers. All endpoints require Admin role.
+- **sqlc:** All queries from `db/queries/coupon.sql`. Already shared with cart module's coupon validation.
+- **Soft delete:** Coupons are soft-deleted via `deleted_at` — don't hard delete to preserve order history references.
+
+### Types & DTOs
+- [ ] `Coupon` — `ID`, `Code`, `Type` (percent/fixed), `Value`, `MinOrderAmount`, `MaxUses`, `UsedCount`, `ExpiresAt`, `CreatedAt`
+- [ ] `CreateCouponRequest` — `code` (required, unique, uppercase alphanumeric), `type` (required, oneof=percent fixed), `value` (required, positive), `min_order_amount` (optional), `max_uses` (optional, 0=unlimited), `expires_at` (optional)
+- [ ] `UpdateCouponRequest` — all fields optional (pointer types); `code` immutable after creation
+- [ ] `CouponFilter` — `type`, `active` (bool), `cursor`, `limit`
+
+### Service Layer (`service.go`)
+- [ ] `ListCoupons(ctx, filter) (*PaginatedCoupons, error)` — cursor pagination
+- [ ] `CreateCoupon(ctx, req) (*Coupon, error)` — validate code uniqueness (uppercase, no special chars)
+- [ ] `UpdateCoupon(ctx, couponID, req) (*Coupon, error)` — code field is immutable
+- [ ] `DeleteCoupon(ctx, couponID) error` — soft delete (set `deleted_at`)
+
+### Handler Layer (`handler.go`)
+- [ ] `GET /api/v1/admin/coupons` — require Admin, parse filter, call `ListCoupons`
+- [ ] `POST /api/v1/admin/coupons` — require Admin, bind+validate, call `CreateCoupon`, return 201
+- [ ] `PUT /api/v1/admin/coupons/:id` — require Admin, bind+validate, call `UpdateCoupon`
+- [ ] `DELETE /api/v1/admin/coupons/:id` — require Admin, call `DeleteCoupon`, return 204
+
+### Repository Layer (`repository/`)
+- [ ] `db/queries/cart.sql` (shared with cart module for coupon queries):
+  - [ ] `ListCoupons` — SELECT with type filter, `WHERE deleted_at IS NULL`, cursor pagination
+  - [ ] `CreateCoupon` — INSERT
+  - [ ] `UpdateCoupon` — UPDATE fields (except code and used_count)
+  - [ ] `SoftDeleteCoupon` — UPDATE deleted_at = now()
+  - [ ] `GetCouponByID` — SELECT by id
+- [ ] Run `sqlc generate`
+
+### Tests
+- [ ] Unit tests:
+  - [ ] CreateCoupon: success, duplicate code, invalid type
+  - [ ] UpdateCoupon: success, code cannot change, not found
+  - [ ] DeleteCoupon: success, soft delete verified
+  - [ ] ListCoupons: active filter, type filter, pagination

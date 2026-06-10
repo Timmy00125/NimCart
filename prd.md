@@ -26,6 +26,7 @@
 4. [Technology Stack](#4-technology-stack)
 5. [Architecture — Modular Monolith](#5-architecture--modular-monolith)
 6. [Module Specifications](#6-module-specifications)
+    - 6.1 Auth, 6.2 Catalog, 6.3 Cart, 6.4 Order, 6.5 Payment, 6.6 Inventory, 6.7 User, 6.8 Review, 6.9 Analytics, 6.10 Notification, 6.11 Coupon Management
 7. [Database Schema](#7-database-schema)
 8. [Frontend Specifications](#8-frontend-specifications)
 9. [Non-Functional Requirements](#9-non-functional-requirements)
@@ -159,6 +160,7 @@ nimcart/
 │   ├── user/               # User profile, addresses
 │   ├── notification/       # Email + in-app events
 │   ├── review/             # Product ratings & reviews
+│   ├── analytics/          # Admin dashboard metrics & KPIs
 │   └── platform/           # Shared: DB pool, logger, config, event bus
 ├── db/
 │   ├── migrations/         # Atlas HCL migration files
@@ -342,9 +344,52 @@ Customers can submit one review per purchased product after order status reaches
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
 | `/api/v1/products/:id/reviews` | GET | Public | List approved reviews for a product (paginated). |
+| `/api/v1/products/:id/reviews/summary` | GET | Public | Get average rating, total count, star distribution. |
 | `/api/v1/products/:id/reviews` | POST | Customer | Submit review. Validates purchase eligibility. |
+| `/api/v1/admin/reviews` | GET | Admin | List all reviews with status filter. |
 | `/api/v1/admin/reviews/:id` | PATCH | Admin | Approve or reject a review with optional moderator notes. |
 | `/api/v1/admin/reviews/:id` | DELETE | Admin | Hard delete review (abuse removal). |
+
+---
+
+### 6.9 Analytics Module
+
+Provides aggregated metrics for the admin dashboard. All endpoints require Admin authentication.
+
+| Endpoint | Method | Auth | Description |
+|---|---|---|---|
+| `/api/v1/admin/analytics/summary` | GET | Admin | Returns KPIs: total revenue, order count, customer count, AOV. Supports `period` param (7d/30d/90d/custom). |
+| `/api/v1/admin/analytics/revenue` | GET | Admin | Revenue time series (daily/weekly/monthly) for charting. |
+| `/api/v1/admin/analytics/orders-by-status` | GET | Admin | Distribution of orders across statuses. |
+| `/api/v1/admin/analytics/top-products` | GET | Admin | Top products by revenue (limit param, default 10). |
+| `/api/v1/admin/analytics/sales-by-category` | GET | Admin | Revenue breakdown per category, with percentages. |
+
+Analytics data is pre-computed via materialized views or cached queries in Redis (TTL 30 min).
+
+---
+
+### 6.10 Notification Module
+
+Handles email delivery and in-app notifications via River background jobs. Subscribes to domain events from the internal event bus.
+
+| Endpoint | Method | Auth | Description |
+|---|---|---|---|
+| `/api/v1/notifications` | GET | Customer | List unread in-app notifications for current user. |
+| `/api/v1/notifications/:id/read` | PATCH | Customer | Mark a single notification as read. |
+| `/api/v1/notifications/read-all` | PATCH | Customer | Mark all notifications as read.
+
+---
+
+### 6.11 Coupon Management
+
+Coupons are created and managed by admins. The cart module validates and applies coupons at checkout; the order module increments `used_count` on successful order placement.
+
+| Endpoint | Method | Auth | Description |
+|---|---|---|---|
+| `/api/v1/admin/coupons` | GET | Admin | List all coupons with pagination. Supports filter by type and active/expired. |
+| `/api/v1/admin/coupons` | POST | Admin | Create a new coupon (code, type, value, min_order_amount, max_uses, expires_at). |
+| `/api/v1/admin/coupons/:id` | PUT | Admin | Update coupon fields. |
+| `/api/v1/admin/coupons/:id` | DELETE | Admin | Soft-delete coupon (sets `deleted_at`).
 
 ---
 
