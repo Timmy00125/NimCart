@@ -26,19 +26,20 @@
   - [ ] Enable `sourceMap` for development
   - [ ] Configure `assets` and `styles` paths
 
-### TailwindCSS Setup
+### TailwindCSS v4 Setup
 - [ ] Install: `npm install -D tailwindcss @tailwindcss/postcss postcss autoprefixer`
-- [ ] Create `tailwind.config.js` with:
-  - [ ] `content` paths: `./src/**/*.{html,ts}`
-  - [ ] Extend theme with NimCart design tokens (colors, spacing, typography)
-  - [ ] Import SpartanUI Tailwind preset
-- [ ] Create `postcss.config.js` with Tailwind plugin
-- [ ] Add `@tailwind base; @tailwind components; @tailwind utilities;` to `styles.css`
+- [ ] Create `postcss.config.js`:
+  - [ ] Register `@tailwindcss/postcss` plugin
+- [ ] Update `styles.css` with CSS-based configuration:
+  - [ ] `@import "tailwindcss";`
+  - [ ] `@import "@spartan-ng/brain/hlm-tailwind-preset.css";`
+  - [ ] Use `@theme` block to define NimCart design tokens (colors, spacing, typography)
+  - [ ] Do **not** create `tailwind.config.js` — v4 uses CSS-based configuration
+- [ ] Verify purge/content detection works via `ng build`
 
 ### SpartanUI Setup
 - [ ] Install brain primitives: `npm install @spartan-ng/brain`
 - [ ] Install CLI: `npm install -D @spartan-ng/cli`
-- [ ] Import Tailwind preset: `@import "@spartan-ng/brain/hlm-tailwind-preset.css"` in `styles.css`
 - [ ] Add required components via CLI (`ng g @spartan-ng/cli:ui`):
   - [ ] Button, Card, Badge, Input, Label, Select, Checkbox, RadioGroup
   - [ ] Dialog, AlertDialog, Sheet, ScrollArea
@@ -56,7 +57,8 @@
 
 ### Environment Configuration
 - [ ] Create `src/environments/environment.ts` (dev) and `environment.prod.ts`
-- [ ] Define: `apiUrl`, `stripePublishableKey`, `sentryDsn`
+- [ ] Define: `apiUrl`, `sentryDsn`
+- [ ] No Stripe/payment gateway keys required in v1 (payments are simulated)
 
 ### ESLint & Prettier
 - [ ] Install and configure `@angular-eslint` with recommended rules
@@ -72,6 +74,23 @@
 - [ ] Create `playwright.config.ts` with base URL, test directory, browser projects
 - [ ] Add test scripts to `package.json`: `test`, `test:watch`, `test:coverage`, `e2e`
 
+### Container Image
+- [ ] Create `Dockerfile` for the Angular frontend:
+  - [ ] Multi-stage build: `node:22-alpine` → `nginx:alpine`
+  - [ ] Build with `ng build --configuration production`
+  - [ ] Serve with Nginx; include `nginx.conf` for SPA fallback, gzip, security headers
+  - [ ] Expose port 80, run as non-root user
+- [ ] Create `.dockerignore` (exclude `node_modules`, `.angular`, `dist`)
+
+### Charting Library (Admin Analytics)
+- [ ] Install chart library: `npm install @swimlane/ngx-charts` (or `ng2-charts`)
+- [ ] Import required modules in `AdminAnalyticsComponent`
+- [ ] Create reusable chart components:
+  - [ ] `RevenueChartComponent` (line chart)
+  - [ ] `OrdersByStatusChartComponent` (pie/donut)
+  - [ ] `TopProductsChartComponent` (horizontal bar)
+  - [ ] `SalesByCategoryChartComponent` (bar)
+
 ---
 
 ## Core Module (`src/app/core/`)
@@ -83,14 +102,27 @@
 - [ ] `logout(): Observable<void>` — POST `/api/v1/auth/logout`
 - [ ] `forgotPassword(email): Observable<void>` — POST `/api/v1/auth/forgot-password`
 - [ ] `resetPassword(token, password): Observable<void>` — POST `/api/v1/auth/reset-password`
+- [ ] `changePassword(oldPassword, newPassword): Observable<void>` — POST `/api/v1/auth/change-password`
+- [ ] `verifyEmail(token): Observable<void>` — POST `/api/v1/auth/verify-email`
+- [ ] `resendVerification(): Observable<void>` — POST `/api/v1/auth/resend-verification`
+- [ ] `requestSellerUpgrade(): Observable<void>` — POST `/api/v1/auth/request-seller-upgrade`
 - [ ] `getMe(): Observable<User>` — GET `/api/v1/auth/me`
 - [ ] Store access token in memory (Signal), refresh token in HttpOnly cookie (server-managed)
 
+### ApiError Types (`src/app/core/models/api-error.model.ts`)
+- [ ] Define `ApiError` interface matching RFC 7807: `type`, `title`, `status`, `detail`, `instance`, `errors?`
+- [ ] Define `FieldError` interface: `field`, `message`, `rejected_value`
+
 ### ApiService
 - [ ] Wrapper around `HttpClient` with base URL from environment
-- [ ] Methods: `get<T>`, `post<T>`, `put<T>`, `patch<T>`, `delete<T>`
+- [ ] Methods: `get<T>`, `post<T>`, `put<T>`, `patch<T>`, `delete<T>` with optional `headers` parameter
 - [ ] Automatic `Content-Type: application/json` header
 - [ ] Error normalization: convert RFC 7807 responses to typed `ApiError`
+
+### GuestSessionService
+- [ ] Generate or read `session_id` from a long-lived `HttpOnly` cookie (or non-HttpOnly if cross-domain dev)
+- [ ] Expose `sessionId` signal
+- [ ] Include `X-Session-ID` header in all cart-related API calls when user is not authenticated
 
 ### TokenInterceptor
 - [ ] Intercept all outgoing requests: attach `Authorization: Bearer {access_token}` from AuthStore
@@ -163,6 +195,7 @@
 - [ ] Root layout: header (navbar), router-outlet, footer
 - [ ] Provide global stores: `AuthStore`, `CartStore`
 - [ ] Initialize auth state on app load (check for existing session)
+- [ ] Initialize guest session on app load (via `GuestSessionService`)
 
 ### Layout Components
 - [ ] `HeaderComponent` — logo, navigation menu (HlmNavigationMenu), search bar, cart icon with badge, user menu
@@ -336,11 +369,11 @@
   - [ ] `isLoading` signal
   - [ ] `isCartOpen` signal — controls drawer visibility
 - [ ] Methods:
-  - [ ] `loadCart()` — GET `/api/v1/cart`, populate state
-  - [ ] `addItem(variantId, quantity)` — POST `/api/v1/cart/items`, update state
-  - [ ] `updateQuantity(itemId, quantity)` — PATCH `/api/v1/cart/items/:itemId`
-  - [ ] `removeItem(itemId)` — DELETE `/api/v1/cart/items/:itemId`
-  - [ ] `clearCart()` — DELETE `/api/v1/cart`
+  - [ ] `loadCart()` — GET `/api/v1/cart` (inject `X-Session-ID` header from `GuestSessionService` when guest), populate state
+  - [ ] `addItem(variantId, quantity)` — POST `/api/v1/cart/items` (inject `X-Session-ID` when guest), update state
+  - [ ] `updateQuantity(itemId, quantity)` — PATCH `/api/v1/cart/items/:itemId` (inject `X-Session-ID` when guest)
+  - [ ] `removeItem(itemId)` — DELETE `/api/v1/cart/items/:itemId` (inject `X-Session-ID` when guest)
+  - [ ] `clearCart()` — DELETE `/api/v1/cart` (inject `X-Session-ID` when guest)
   - [ ] `applyCoupon(code)` — POST `/api/v1/cart/apply-coupon`
   - [ ] `mergeCarts()` — POST `/api/v1/cart/merge` (called post-login)
   - [ ] `openCart()` / `closeCart()` — toggle drawer
@@ -394,7 +427,7 @@
   - [ ] `selectedAddressId` signal
   - [ ] `addresses` signal — user's saved addresses
   - [ ] `cart` signal — current cart (from CartStore)
-  - [ ] `paymentIntentClientSecret` signal — from payment service
+  - [ ] `paymentToken` signal — simulated payment token returned from `/api/v1/orders/:orderId/payment-intent`
   - [ ] `isProcessing` signal
   - [ ] `orderId` signal — set on successful order creation
   - [ ] `error` signal — error message if any
@@ -402,8 +435,8 @@
   - [ ] `loadAddresses()` — GET `/api/v1/users/addresses`
   - [ ] `selectAddress(id)` — set selected address
   - [ ] `createOrder()` — POST `/api/v1/orders` with idempotency key
-  - [ ] `createPaymentIntent()` — POST `/api/v1/payments/intent`
-  - [ ] `confirmPayment()` — Stripe confirmCardPayment
+  - [ ] `createPaymentIntent()` — POST `/api/v1/orders/:orderId/payment-intent`
+  - [ ] `confirmPayment()` — POST `/api/v1/orders/:orderId/simulate-payment` with `{ success: true }`
   - [ ] `goToStep(n)` — navigate between steps
   - [ ] `reset()` — clear all state after order success
 
@@ -424,17 +457,14 @@
 - [ ] "Edit Cart" link → navigate to `/cart`
 - [ ] "Continue to Payment" button → create order (POST /api/v1/orders), go to step 3
 
-### Step 3: Payment
-- [ ] Stripe Elements integration:
-  - [ ] Load Stripe.js with publishable key from environment
-  - [ ] Render Card Element (card number, expiry, CVC)
-  - [ ] Create payment intent on step entry → get client secret
+### Step 3: Simulated Payment
+- [ ] Display order summary and total
 - [ ] "Pay {total}" button:
-  - [ ] Call `stripe.confirmPayment(clientSecret, { payment_method: { card } })`
+  - [ ] Call `CheckoutStore.confirmPayment()` which POSTs to `/api/v1/orders/:orderId/simulate-payment` with `{ success: true }`
   - [ ] Loading state during confirmation
-  - [ ] Handle errors: card declined, insufficient funds, etc.
   - [ ] On success: go to step 4
-- [ ] Security notice: "Your payment info is encrypted and secure"
+  - [ ] On failure: show simulated error message, allow retry
+- [ ] Security notice: "Payments are simulated in v1 — no real card is charged"
 
 ### Step 4: Order Confirmation
 - [ ] Success message: "Order placed successfully!"
@@ -458,16 +488,16 @@
 
 ### Error Handling
 - [ ] Network errors: retry button
-- [ ] Payment errors: show Stripe error message, allow retry
+- [ ] Payment errors: show simulated error message, allow retry
 - [ ] Stock errors (item out of stock during checkout): redirect to cart with message
 - [ ] Session expiry: redirect to login with returnUrl
 
 ### Tests
 - [ ] Store test: step navigation, state transitions
 - [ ] Component test: address selection, form validation
-- [ ] Component test: payment flow with mocked Stripe
+- [ ] Component test: payment flow with simulated confirmation
 - [ ] Component test: order confirmation renders correctly
-- [ ] E2E test: full checkout flow (Playwright)
+- [ ] E2E test: full checkout flow with simulated payment (Playwright)
 
 ---
 
@@ -539,7 +569,11 @@
 - [ ] Edit form (Reactive Forms):
   - [ ] Name input (required, min 2)
   - [ ] Phone input (optional, E.164 format validator)
-  - [ ] Avatar upload: file input with preview, upload to S3 via presigned URL
+  - [ ] Avatar upload: file input with preview
+    - [ ] Request presigned URL from `POST /api/v1/users/avatar/upload`
+    - [ ] Upload file directly to S3/MinIO via presigned PUT URL
+    - [ ] Confirm upload via `POST /api/v1/users/avatar/confirm`
+    - [ ] Refresh profile after confirm
   - [ ] Email display (read-only, cannot change in v1)
 - [ ] Save button → PATCH `/api/v1/users/profile`
 - [ ] Success toast on save
@@ -570,7 +604,7 @@
   - [ ] New password input (min 8, max 128)
   - [ ] Confirm new password input (must match)
   - [ ] Password strength indicator
-  - [ ] Submit → POST `/api/v1/auth/reset-password` (or dedicated change-password endpoint)
+  - [ ] Submit → POST `/api/v1/auth/change-password`
 - [ ] Success: log out all sessions, redirect to login
 
 ### State: `AccountStore` (Feature-scoped)
@@ -637,12 +671,14 @@
   - [ ] `accessToken` signal — stored in memory only
   - [ ] `isLoading` signal
 - [ ] Methods:
-  - [ ] `login(email, password)` — POST login, store tokens, set user
+  - [ ] `login(email, password)` — POST login, store tokens, set user, merge guest cart
   - [ ] `register(data)` — POST register, store tokens, set user
   - [ ] `refresh()` — POST refresh, update access token
   - [ ] `logout()` — POST logout, clear tokens, redirect to `/login`
   - [ ] `loadUser()` — GET /auth/me, set currentUser (called on app init)
   - [ ] `initialize()` — check for existing session on app load
+  - [ ] `requestSellerUpgrade()` — call AuthService
+  - [ ] `changePassword(oldPassword, newPassword)` — call AuthService
 
 ### Guards
 - [ ] `AuthGuard` — redirect to `/login?returnUrl=...` if not authenticated
@@ -726,6 +762,7 @@
   - [ ] Name (required), Description (textarea), Category (select from tree)
   - [ ] Base price (number, cents), Currency (select)
   - [ ] Status (select, admin only for transitions)
+  - [ ] Tags (chip/tag input, stored as TEXT[])
   - [ ] Metadata (key-value editor for JSONB)
 - [ ] Variant management:
   - [ ] Add variant: SKU, price override, options (dynamic key-value)
@@ -789,7 +826,11 @@
 
 ### State: `AdminOrdersStore`
 - [ ] `orders` signal, `selectedOrder` signal, `filters` signal, `cursor` signal, `isLoading` signal
-- [ ] Methods: `loadOrders(filter)`, `loadOrder(id)`, `updateStatus(id, status, notes)`, `processRefund(orderId, amount)`
+- [ ] Methods:
+  - [ ] `loadOrders(filter)` — GET `/api/v1/admin/orders`
+  - [ ] `loadOrder(id)` — GET `/api/v1/admin/orders/:id`
+  - [ ] `updateStatus(id, status, notes)` — PATCH `/api/v1/admin/orders/:id/status`
+  - [ ] `processRefund(orderId, amount, reason)` — POST `/api/v1/admin/orders/:id/refund`
 
 ### Tests
 - [ ] Component test: table renders with filters
@@ -870,7 +911,13 @@
 
 ### State: `AdminUsersStore`
 - [ ] `users` signal, `selectedUser` signal, `filters` signal, `cursor` signal, `isLoading` signal
-- [ ] Methods: `loadUsers(filter)`, `updateUserRole(id, role)`, `updateUserStatus(id, status)`, `approveSeller(id)`
+- [ ] Methods:
+  - [ ] `loadUsers(filter)` — GET `/api/v1/admin/users`
+  - [ ] `getUser(id)` — GET `/api/v1/admin/users/:id`
+  - [ ] `updateUserRole(id, role)` — PATCH `/api/v1/admin/users/:id/role`
+  - [ ] `updateUserStatus(id, status, reason)` — PATCH `/api/v1/admin/users/:id/status`
+  - [ ] `approveSeller(id, notes)` — PATCH `/api/v1/admin/users/:id/seller-approval` with status `approved`
+  - [ ] `rejectSeller(id, reason)` — PATCH `/api/v1/admin/users/:id/seller-approval` with status `rejected`
 
 ### Tests
 - [ ] Component test: table renders with filters
@@ -970,7 +1017,7 @@
 ### Critical Flows
 - [ ] Auth flow: register → login → logout
 - [ ] Browse flow: home → catalog → product detail → add to cart
-- [ ] Checkout flow: cart → address → payment → order confirmation
+- [ ] Checkout flow: cart → address → simulated payment → order confirmation
 - [ ] Admin flow: login as admin → manage products → approve product
 - [ ] Search flow: search bar → results → product detail
 

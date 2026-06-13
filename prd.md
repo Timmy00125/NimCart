@@ -11,8 +11,9 @@
 | Version | 1.0.0 |
 | Status | Draft |
 | Backend | Go 1.25 · Gin · sqlc · pgx/v5 |
-| Frontend | Angular 22 · SpartanUI · TailwindCSS |
+| Frontend | Angular 22 · SpartanUI · TailwindCSS v4 |
 | Database | PostgreSQL 16 · Atlas (migrations) |
+| Payments | Simulated in-process provider (v1) · real gateway deferred to v2 |
 | Architecture | Modular Monolith |
 | Target Audience | SME Retailers, B2C Shoppers |
 
@@ -112,7 +113,7 @@ NimCart is a full-stack eCommerce platform built as a modular monolith. It is de
 |---|---|---|---|
 | Framework | Angular | 22 | Signals-based reactivity, standalone components, built-in SSR support via Angular Universal. |
 | UI Component Library | SpartanUI (spartan.ng) | Latest | Headless + styled Angular component library built on Radix UI primitives. Accessible, themeable, ARIA-compliant. |
-| Styling | TailwindCSS | 3.x | Utility-first CSS; co-located with SpartanUI tokens for consistent design system. |
+| Styling | TailwindCSS | 4.x | Utility-first CSS; CSS-based configuration co-located with SpartanUI tokens for consistent design system. |
 | State Management | NgRx (Signal Store) | 18+ | Lightweight reactive state per feature; fine-grained signal-based reactivity. |
 | HTTP Client | Angular HttpClient + interceptors | Built-in | Centralised auth token injection, error normalisation, retry logic. |
 | Forms | Angular Reactive Forms | Built-in | Typed forms with composable validators. |
@@ -210,6 +211,10 @@ A lightweight, in-process, typed event bus (using Go generics) handles domain ev
 | `/api/v1/auth/logout` | POST | Bearer | Revoke refresh token (stored in Redis blacklist). |
 | `/api/v1/auth/forgot-password` | POST | Public | Send password reset link via email (token valid 1 hour). |
 | `/api/v1/auth/reset-password` | POST | Public | Validate token, update password hash. |
+| `/api/v1/auth/change-password` | POST | Bearer | Change password with old password verification. |
+| `/api/v1/auth/verify-email` | POST | Public | Validate email verification token. |
+| `/api/v1/auth/resend-verification` | POST | Bearer | Resend email verification link. |
+| `/api/v1/auth/request-seller-upgrade` | POST | Bearer | Customer requests upgrade to seller role. |
 | `/api/v1/auth/me` | GET | Bearer | Return authenticated user's profile. |
 
 #### Roles & Permissions
@@ -284,22 +289,25 @@ Orders are state machines with the following states:
 | `/api/v1/admin/orders` | GET | Admin/Seller | List all orders with advanced filters. |
 | `/api/v1/admin/orders/:id/status` | PATCH | Admin/Seller | Transition order status with optional notes. |
 | `/api/v1/orders/:id/refund` | POST | Customer | Request refund with reason. |
+| `/api/v1/admin/orders/:id/refund` | POST | Admin | Process refund for a requested order. |
+| `/api/v1/orders/:id/payment-intent` | POST | Customer | Create simulated payment intent for the order. |
+| `/api/v1/orders/:id/simulate-payment` | POST | Customer | Simulate payment success/failure for the order. |
 
 ---
 
 ### 6.5 Payment Module
 
-Abstracts payment gateway interactions behind an internal `PaymentProvider` interface, allowing gateway swaps without changing business logic. v1 targets Stripe as the primary gateway with Paystack as the alternative for NGN markets.
+Abstracts payment gateway interactions behind an internal `PaymentProvider` interface, allowing gateway swaps without changing business logic. **v1 uses a simulated in-process provider** — no real gateway integration. Real Stripe/Paystack integration is deferred to v2.
 
 | Concern | Detail |
 |---|---|
-| Gateway | Stripe (primary) / Paystack (NGN fallback) |
-| Flow | Create `PaymentIntent` server-side → confirm client-side → webhook → update order status. |
-| Idempotency | All Stripe calls include a `stripe-idempotency-key` derived from `order_id + attempt_number`. |
-| Webhooks | `POST /api/v1/webhooks/stripe` — validates `Stripe-Signature` header before processing. |
-| Refunds | Initiated via payment module; amount capped at original charge. |
-| Currencies | USD (primary), NGN (Paystack), EUR. |
-| PCI Compliance | Card data never touches NimCart servers; tokenised via Stripe.js / Paystack inline. |
+| Gateway | Simulated provider (v1) |
+| Flow | Create simulated `PaymentIntent` server-side → confirm via `POST /api/v1/orders/:id/simulate-payment` → update order status. |
+| Idempotency | Simulated provider uses idempotency keys derived from `order_id + attempt_number`. |
+| Webhooks | No real webhooks in v1. |
+| Refunds | Simulated refunds; amount capped at original charge. |
+| Currencies | USD (primary), EUR. |
+| PCI Compliance | No card data is collected, stored, or transmitted in v1. |
 
 ---
 
@@ -326,7 +334,9 @@ Manages stock levels per product variant with a two-phase reservation model to p
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
 | `/api/v1/users/profile` | GET | Customer | Get own profile. |
-| `/api/v1/users/profile` | PATCH | Customer | Update name, avatar, phone. |
+| `/api/v1/users/profile` | PATCH | Customer | Update name, phone. |
+| `/api/v1/users/avatar/upload` | POST | Customer | Request presigned URL for avatar upload. |
+| `/api/v1/users/avatar/confirm` | POST | Customer | Confirm avatar upload and update profile. |
 | `/api/v1/users/addresses` | GET | Customer | List saved addresses. |
 | `/api/v1/users/addresses` | POST | Customer | Add new address. |
 | `/api/v1/users/addresses/:id` | PUT | Customer | Update address. |
@@ -334,6 +344,11 @@ Manages stock levels per product variant with a two-phase reservation model to p
 | `/api/v1/users/wishlist` | GET | Customer | Fetch wishlist items. |
 | `/api/v1/users/wishlist` | POST | Customer | Add product to wishlist. |
 | `/api/v1/users/wishlist/:productId` | DELETE | Customer | Remove from wishlist. |
+| `/api/v1/admin/users` | GET | Admin | List all users with filters. |
+| `/api/v1/admin/users/:id` | GET | Admin | Get user details. |
+| `/api/v1/admin/users/:id/role` | PATCH | Admin | Update user role. |
+| `/api/v1/admin/users/:id/status` | PATCH | Admin | Update user status (suspend/deactivate/reactivate). |
+| `/api/v1/admin/users/:id/seller-approval` | PATCH | Admin | Approve or reject seller upgrade request. |
 
 ---
 
@@ -404,7 +419,7 @@ All tables include `created_at TIMESTAMPTZ DEFAULT now()` and `updated_at` manag
 | `users` | `id UUID` | `email`, `password_hash`, `role`, `status`, `email_verified_at` | `role: ENUM(guest, customer, seller, admin)` |
 | `addresses` | `id UUID` | `user_id FK`, `full_name`, `line1`, `line2`, `city`, `state`, `country`, `postal_code`, `is_default` | |
 | `categories` | `id UUID` | `name`, `slug`, `parent_id` (self FK), `depth`, `path` (ltree) | ltree extension for hierarchical queries |
-| `products` | `id UUID` | `seller_id FK`, `category_id FK`, `name`, `slug`, `description`, `status`, `base_price`, `currency`, `metadata JSONB` | `status: ENUM(draft, pending, active, archived)` |
+| `products` | `id UUID` | `seller_id FK`, `category_id FK`, `name`, `slug`, `description`, `status`, `base_price`, `currency`, `tags TEXT[]`, `metadata JSONB` | `status: ENUM(draft, pending, active, archived)` |
 | `product_variants` | `id UUID` | `product_id FK`, `sku`, `price_override`, `options JSONB`, `images JSONB[]` | `options: {"size":"M","colour":"Red"}` |
 | `inventory` | `id UUID` | `variant_id FK`, `physical_stock`, `reserved_hard`, `reorder_threshold` | `available = physical − reserved_hard` |
 | `carts` | `id UUID` | `user_id FK (nullable)`, `session_id`, `expires_at` | session cart for guests |
@@ -416,10 +431,12 @@ All tables include `created_at TIMESTAMPTZ DEFAULT now()` and `updated_at` manag
 | `reviews` | `id UUID` | `product_id FK`, `user_id FK`, `order_id FK`, `rating (1–5)`, `title`, `body`, `status`, `moderated_by FK` | `status: ENUM(pending, approved, rejected)` |
 | `coupons` | `id UUID` | `code (unique)`, `type (percent/fixed)`, `value`, `min_order_amount`, `max_uses`, `used_count`, `expires_at` | |
 | `jobs` (River) | `id BIGINT` | `kind`, `args JSONB`, `state`, `queue`, `priority`, `scheduled_at`, `attempt` | Managed by River library |
+| `failed_events` | `id UUID` | `event_name`, `payload JSONB`, `error`, `attempts`, `created_at` | Event bus dead-letter table |
 
 ### 7.2 Indexes
 
 - `products`: GIN index on `to_tsvector(name || ' ' || description)` for full-text search.
+- `products`: GIN index on `tags` for tag filtering.
 - `products`: BTREE on `(category_id, status)` for catalog listing.
 - `orders`: BTREE on `(user_id, created_at DESC)` for customer order history.
 - `inventory`: BTREE on `variant_id` (unique) for lock-free reservation updates.
@@ -522,14 +539,14 @@ src/app/
 
 - Passwords hashed with bcrypt, cost factor 12. Never stored in plaintext or logged.
 - PII (email, phone, address) encrypted at rest using PostgreSQL `pgcrypto` for fields with elevated sensitivity.
-- Payment card data never stored. Stripe tokenisation handles card capture client-side.
+- Payment card data never collected or stored in v1 (simulated provider).
 - Database credentials rotated via HashiCorp Vault dynamic secrets.
 
 ### 10.3 API Security
 
 - CSRF protection via `SameSite=Strict` cookie policy for the refresh token cookie.
 - All uploads (product images) scanned for MIME type mismatch and capped at 10 MB.
-- Stripe webhook signature verified with `stripe.ConstructEvent` before processing.
+- No real payment webhooks in v1; simulation endpoints are disabled in production.
 - All endpoints behind rate-limiting middleware (Redis token bucket).
 
 ---
@@ -605,7 +622,7 @@ atlas migrate apply --env dev
 | **M1 — Auth & User** | Auth module (register, login, JWT, RBAC), User module (profile, addresses). Angular: auth pages, route guards. | Week 3–4 |
 | **M2 — Catalog** | Catalog module (CRUD products, categories, variants, images, full-text search). Angular: product listing, product detail page. | Week 5–7 |
 | **M3 — Cart & Checkout** | Cart module (guest + user, merge, coupon). Order module (create order, state machine). Angular: cart drawer, checkout flow. | Week 8–10 |
-| **M4 — Payments** | Payment module (Stripe integration, webhooks, idempotency). Order status updates. Angular: Stripe Elements integration, order confirmation. | Week 11–12 |
+| **M4 — Payments** | Payment module (simulated provider, payment intent, confirmation, refunds). Order status updates. Angular: simulated payment UI, order confirmation. | Week 11–12 |
 | **M5 — Inventory & Reviews** | Inventory module (reservations, low-stock alerts). Review module (submit, moderation). Angular: admin inventory table, review UI. | Week 13–14 |
 | **M6 — Admin Dashboard** | Admin: order management, product approval, user management, sales metrics. Angular: admin feature module. | Week 15–16 |
 | **M7 — Hardening** | Performance profiling, security audit, E2E Playwright tests, Lighthouse optimisation, OpenTelemetry instrumentation, documentation. | Week 17–18 |
@@ -617,7 +634,7 @@ atlas migrate apply --env dev
 
 | ID | Item | Impact | Mitigation |
 |---|---|---|---|
-| R-01 | Paystack webhook reliability in NGN market | Medium | Implement webhook retry queue via River jobs with exponential backoff. |
+| R-01 | Real payment gateway integration deferred to v2 | Low | v1 uses simulated provider; gateway swap is designed behind `PaymentProvider` interface. |
 | R-02 | sqlc codegen churn if schema changes frequently early on | Low | Lock schema early; treat schema changes as a formal migration PR review step. |
 | R-03 | Atlas HCL learning curve for team | Low | Provide team onboarding doc; use `atlas schema inspect` to bootstrap from existing DB. |
 | R-04 | SpartanUI component gaps (not all Radix primitives ported to Angular) | Medium | Audit required components in M0; build custom wrappers for any gaps. |
@@ -637,6 +654,7 @@ atlas migrate apply --env dev
 | **Atlas** | A database schema management tool that enables declarative HCL-based migrations with automatic diff and CI integration. |
 | **River** | A Postgres-backed background job library for Go. Stores jobs in a DB table, eliminating the need for a separate message broker in v1. |
 | **SpartanUI** | An Angular component library providing headless, accessible UI primitives (built on Radix UI concepts) with Tailwind-based styling. |
+| **Simulated Payment Provider** | An in-process payment implementation used in v1 that mimics payment intent creation, confirmation, and refunds without connecting to a real gateway. |
 | **PgBouncer** | A lightweight connection pooler for PostgreSQL that runs in transaction mode, reducing active DB connections under load. |
 | **Soft Reservation** | A temporary hold on inventory stored in Redis when an item is added to cart, expiring after 30 minutes if no order is placed. |
 | **Hard Reservation** | A durable inventory hold written to PostgreSQL when an order is created, released only on cancellation or fulfilment. |
