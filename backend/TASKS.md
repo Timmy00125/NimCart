@@ -10,7 +10,7 @@
 - [ ] Add `depguard` rules: forbid `internal/auth` from importing `internal/catalog/internal/...`, etc.
 - [ ] Create `Makefile` with targets: `lint`, `test`, `build`, `generate`, `migrate-up`, `migrate-diff`, `serve`
 - [ ] Create `.air.toml` for hot-reload during development
-- [ ] Create `.env.example` with all required environment variables
+- [ ] Create `.env.example` with all required environment variables (no real gateway secrets required in v1)
 
 ### Docker Compose
 - [ ] Create `docker-compose.yml` with services: `postgres:16`, `redis:7`, `minio`, `pgbouncer`
@@ -19,6 +19,15 @@
 - [ ] Add health checks for all services
 - [ ] Create `docker-compose.override.yml` for local dev port mappings
 - [ ] Add MinIO init container to create default bucket (`nimcart-assets`)
+
+### Container Images
+- [ ] Create `Dockerfile` for the Go backend:
+  - [ ] Multi-stage build: `golang:1.25-alpine` → `alpine:latest`
+  - [ ] Build `cmd/server` binary with `CGO_ENABLED=0`
+  - [ ] Copy migrations and Atlas binary for init containers
+  - [ ] Expose port 8080, run as non-root user
+  - [ ] Health check via `wget --spider http://localhost:8080/health`
+- [ ] Create `.dockerignore` (exclude `.git`, `tmp`, `frontend`, `*.test`)
 
 ### sqlc Configuration
 - [ ] Create `sqlc.yaml` at project root
@@ -29,12 +38,14 @@
   - `internal/auth/repository/` for `db/queries/auth.sql`
   - `internal/catalog/repository/` for `db/queries/catalog.sql`
   - `internal/cart/repository/` for `db/queries/cart.sql`
+  - `internal/coupon/repository/` for `db/queries/coupon.sql`
   - `internal/order/repository/` for `db/queries/order.sql`
   - `internal/payment/repository/` for `db/queries/payment.sql`
   - `internal/inventory/repository/` for `db/queries/inventory.sql`
   - `internal/user/repository/` for `db/queries/user.sql`
   - `internal/review/repository/` for `db/queries/review.sql`
   - `internal/analytics/repository/` for `db/queries/analytics.sql`
+  - `internal/notification/repository/` for `db/queries/notification.sql`
 - [ ] Enable `emit_json_tags: true`, `emit_db_tags: true`
 - [ ] Set `output_db_value_as_pointers: false` (prefer value types)
 
@@ -76,6 +87,8 @@
 - [ ] `github.com/redis/go-redis/v9` — caching & rate limiting
 - [ ] `ariga.io/atlas` — migrations (CLI tool)
 
+> **Payment v1 note:** No Stripe/Paystack SDKs are required. Payments are simulated in-process. Real gateway integration is deferred to v2.
+
 ---
 
 ## cmd/server — Application Entry Point & Wiring
@@ -98,18 +111,18 @@
 
 ### Module Wiring
 - [ ] Instantiate each module's repository from sqlc-generated code (`repository.New(dbPool)`)
-- [ ] Instantiate each module's service with its dependencies injected:
-  - [ ] `auth.NewService(authRepo, userRepo, redisClient, jwtConfig, emailService)`
+- [ ] Instantiate each module's service with its dependencies injected (services may only depend on other module **service interfaces**, not repositories):
+  - [ ] `auth.NewService(authRepo, redisClient, jwtConfig, emailService)`
   - [ ] `catalog.NewService(catalogRepo, s3Client, eventBus)`
-  - [ ] `cart.NewService(cartRepo, inventoryService, redisClient, eventBus)`
-  - [ ] `coupon.NewService(cartRepo)` (coupon admin CRUD shares cart repository for coupon queries)
-  - [ ] `order.NewService(orderRepo, cartService, paymentService, inventoryService, eventBus)`
-  - [ ] `payment.NewService(paymentRepo, orderService, stripeClient, eventBus)`
+  - [ ] `cart.NewService(cartRepo, inventoryService, couponService, redisClient, eventBus)`
+  - [ ] `coupon.NewService(couponRepo)`
+  - [ ] `order.NewService(orderRepo, cartService, paymentService, inventoryService, couponService, eventBus)`
+  - [ ] `payment.NewService(paymentRepo, eventBus)` *(simulated provider only for v1)*
   - [ ] `inventory.NewService(inventoryRepo, redisClient, eventBus)`
-  - [ ] `user.NewService(userRepo, s3Client)`
-  - [ ] `notification.NewService(emailClient, eventBus)`
-  - [ ] `review.NewService(reviewRepo, orderService)`
-  - [ ] `analytics.NewService(analyticsRepo, orderRepo, productRepo)`
+  - [ ] `user.NewService(userRepo, s3Client, eventBus)`
+  - [ ] `notification.NewService(emailClient, notificationRepo, eventBus)`
+  - [ ] `review.NewService(reviewRepo, orderService, eventBus)`
+  - [ ] `analytics.NewService(analyticsRepo, redisClient)`
 - [ ] Initialize internal event bus (`eventbus.New()`) with typed event channels
 - [ ] Register all event handlers (cross-module subscriptions)
 
@@ -128,14 +141,15 @@
   - [ ] `auth.RegisterRoutes(v1, authService, jwtMiddleware)`
   - [ ] `catalog.RegisterRoutes(v1, catalogService, authMiddleware)`
   - [ ] `cart.RegisterRoutes(v1, cartService, optionalAuthMiddleware)`
-  - [ ] `order.RegisterRoutes(v1, orderService, authMiddleware)`
-  - [ ] `payment.RegisterRoutes(v1, paymentService)`
+  - [ ] `order.RegisterRoutes(v1, orderService, paymentService, authMiddleware)`
+  - [ ] `payment.RegisterRoutes(v1, paymentService)` *(simulated endpoints only)*
   - [ ] `inventory.RegisterRoutes(v1, inventoryService, authMiddleware)`
   - [ ] `user.RegisterRoutes(v1, userService, authMiddleware)`
   - [ ] `review.RegisterRoutes(v1, reviewService, authMiddleware)`
   - [ ] `analytics.RegisterRoutes(v1, analyticsService, authMiddleware)`
   - [ ] `coupon.RegisterRoutes(v1, couponService, authMiddleware)`
-- [ ] Register Stripe webhook route: `POST /api/v1/webhooks/stripe` (raw body, no JSON parsing)
+  - [ ] `notification.RegisterRoutes(v1, notificationService, authMiddleware)`
+- [ ] **No real payment webhooks in v1** — simulation endpoints are registered under `/api/v1/payments/*`
 
 ### Graceful Shutdown
 - [ ] Listen for `SIGINT`, `SIGTERM` via `signal.NotifyContext`
@@ -199,10 +213,12 @@
   - [ ] `status product_status NOT NULL DEFAULT 'draft'` (ENUM: draft, pending, active, archived)
   - [ ] `base_price BIGINT NOT NULL` (cents)
   - [ ] `currency VARCHAR(3) NOT NULL DEFAULT 'USD'`
+  - [ ] `tags TEXT[] DEFAULT '{}'`
   - [ ] `metadata JSONB DEFAULT '{}'`
   - [ ] `images TEXT[] DEFAULT '{}'`
   - [ ] `created_at`, `updated_at`, `archived_at`
   - [ ] Index: GIN on `to_tsvector('english', name || ' ' || description)`
+  - [ ] Index: GIN on `tags`
   - [ ] Index: BTREE on `(category_id, status)`
   - [ ] Partial index: `WHERE status = 'active' AND archived_at IS NULL`
 
@@ -282,7 +298,7 @@
 - [ ] `payments` table:
   - [ ] `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
   - [ ] `order_id UUID NOT NULL REFERENCES orders(id)`
-  - [ ] `gateway VARCHAR(20) NOT NULL` (stripe, paystack)
+  - [ ] `gateway VARCHAR(20) NOT NULL` (simulated)
   - [ ] `gateway_payment_id VARCHAR(255)`
   - [ ] `amount BIGINT NOT NULL`
   - [ ] `currency VARCHAR(3) NOT NULL`
@@ -357,6 +373,14 @@
   - [ ] `attempts INTEGER DEFAULT 0`
   - [ ] `created_at TIMESTAMPTZ DEFAULT now()`
 
+- [ ] `failed_events` table (event bus dead-letter):
+  - [ ] `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+  - [ ] `event_name VARCHAR(100) NOT NULL`
+  - [ ] `payload JSONB NOT NULL`
+  - [ ] `error TEXT`
+  - [ ] `attempts INTEGER DEFAULT 0`
+  - [ ] `created_at TIMESTAMPTZ DEFAULT now()`
+
 ### Enums
 - [ ] Define all ENUM types in `enums.hcl`:
   - [ ] `user_role`: guest, customer, seller, admin
@@ -375,6 +399,14 @@
 - [ ] Enable `pgcrypto` (for `gen_random_uuid()`)
 - [ ] Enable `ltree` (for category hierarchy)
 
+### Materialized Views (Analytics)
+- [ ] `mv_revenue_summary` — pre-aggregated revenue, order count, AOV by day
+- [ ] `mv_orders_by_status` — snapshot count of orders per status, refreshed daily
+- [ ] `mv_top_products` — pre-computed top products by revenue, refreshed every 6 hours
+- [ ] `mv_sales_by_category` — pre-computed category revenue breakdown
+- [ ] Create `REFRESH MATERIALIZED VIEW CONCURRENTLY` strategy with unique indexes
+- [ ] Add admin force-refresh param `?refresh=true` to invalidate cache and refresh views
+
 ### Atlas Migrations
 - [ ] Run `atlas migrate diff --env dev initial_schema` to generate first migration
 - [ ] Review generated SQL for correctness
@@ -385,9 +417,10 @@
 ### sqlc Query Files
 - [ ] `auth.sql` — user CRUD, password update, email verification
 - [ ] `catalog.sql` — product CRUD, category tree, full-text search, variants
-- [ ] `cart.sql` — cart CRUD, cart items, coupon CRUD, coupon validation
+- [ ] `cart.sql` — cart CRUD, cart items, coupon validation (read-only)
+- [ ] `coupon.sql` — coupon CRUD (admin), coupon validation
 - [ ] `order.sql` — order CRUD, order items, order events, idempotency
-- [ ] `payment.sql` — payment CRUD, gateway lookup
+- [ ] `payment.sql` — payment CRUD, simulated gateway lookup
 - [ ] `inventory.sql` — stock levels, reservations, audit log
 - [ ] `user.sql` — profile, addresses, wishlist
 - [ ] `review.sql` — review CRUD, moderation, summaries
@@ -505,8 +538,7 @@
   - [ ] `Database` — `URL`, `MaxConns`, `MinConns`, `MaxConnLifetime`, `MaxConnIdleTime`
   - [ ] `Redis` — `URL`, `PoolSize`, `MinIdleConns`
   - [ ] `JWT` — `AccessTTL` (15m), `RefreshTTL` (7d), `RSAPrivateKeyPath`, `RSAPublicKeyPath`
-  - [ ] `Stripe` — `SecretKey`, `WebhookSecret`, `PublishableKey`
-  - [ ] `Paystack` — `SecretKey`, `WebhookSecret`
+  - [ ] `Payment` — `Provider` (always `simulated` in v1), `SimulationFailureRate` (float, 0.0 default, only in dev/test)
   - [ ] `S3` — `Endpoint`, `Bucket`, `AccessKey`, `SecretKey`, `Region`, `UseSSL`
   - [ ] `Email` — `Provider` (sendgrid/smtp), `APIKey`, `FromAddress`, `FromName`, `SMTPHost`, `SMTPPort`
   - [ ] `RateLimit` — `GeneralRPM` (1000), `LoginRPM` (10)
@@ -570,6 +602,9 @@
   - [ ] Recovery middleware: catch panics in handlers
   - [ ] Metrics middleware: count events published/handled/failed
 - [ ] Buffer size configurable per event type (default 1000)
+- [ ] Durability strategy:
+  - [ ] In-memory bus is used for notifications and cache invalidation (best-effort)
+  - [ ] Critical state-changing events (`PaymentConfirmed`, `OrderPlaced`, `OrderCancelled`, `RefundProcessed`) are enqueued as River jobs before the HTTP response returns
 - [ ] Dead-letter: events that fail all retries logged to `failed_events` table
 
 #### Tests
@@ -616,6 +651,8 @@
 - [ ] `RefreshRequest` — `refresh_token` (required)
 - [ ] `ForgotPasswordRequest` — `email` (required, email)
 - [ ] `ResetPasswordRequest` — `token` (required), `password` (required, min 8)
+- [ ] `ChangePasswordRequest` — `old_password` (required), `new_password` (required, min 8)
+- [ ] `VerifyEmailRequest` — `token` (required)
 - [ ] `AuthResponse` — `access_token`, `refresh_token`, `expires_in`, `token_type`
 - [ ] `UserResponse` — `id`, `email`, `name`, `role`, `status`, `email_verified_at`, `created_at`
 
@@ -626,7 +663,11 @@
 - [ ] `Logout(ctx, userID, refreshToken) error` — add refresh token to Redis blacklist (TTL = token expiry)
 - [ ] `ForgotPassword(ctx, email) error` — generate reset token (crypto/rand, 32 bytes), store in Redis (TTL 1 hour), enqueue email via River job
 - [ ] `ResetPassword(ctx, token, newPassword) error` — validate token from Redis, hash new password, update DB, invalidate all existing refresh tokens
+- [ ] `ChangePassword(ctx, userID, oldPassword, newPassword) error` — verify old password, hash new password, update DB, invalidate all existing refresh tokens
+- [ ] `RequestEmailVerification(ctx, userID) error` — generate verification token (UUID), store in Redis (TTL 24h), enqueue verification email
+- [ ] `VerifyEmail(ctx, token) error` — validate token from Redis, set `email_verified_at` in DB
 - [ ] `GetMe(ctx, userID) (*UserResponse, error)` — fetch user profile from DB
+- [ ] `RequestSellerUpgrade(ctx, userID) error` — create seller upgrade request, notify admins via event bus
 
 ### JWT Utilities
 - [ ] `GenerateAccessToken(user) (string, error)` — RS256 sign, claims: `sub` (user ID), `role`, `exp` (15 min), `iat`, `jti`
@@ -648,6 +689,10 @@
 - [ ] `POST /api/v1/auth/logout` — require auth, call `service.Logout`, clear cookie, return 204
 - [ ] `POST /api/v1/auth/forgot-password` — bind+validate, call `service.ForgotPassword`, return 200 (always, even if email not found — prevent enumeration)
 - [ ] `POST /api/v1/auth/reset-password` — bind+validate, call `service.ResetPassword`, return 200
+- [ ] `POST /api/v1/auth/change-password` — require auth, bind+validate `ChangePasswordRequest`, call `service.ChangePassword`, return 200
+- [ ] `POST /api/v1/auth/verify-email` — bind+validate `VerifyEmailRequest`, call `service.VerifyEmail`, return 200
+- [ ] `POST /api/v1/auth/resend-verification` — require auth, call `service.RequestEmailVerification`, return 200
+- [ ] `POST /api/v1/auth/request-seller-upgrade` — require auth, call `service.RequestSellerUpgrade`, return 202
 - [ ] `GET /api/v1/auth/me` — require auth, call `service.GetMe`, return `UserResponse`
 
 ### Repository Layer (`repository/`)
@@ -667,6 +712,9 @@
   - [ ] Refresh: success, expired token, blacklisted token
   - [ ] ForgotPassword: success, non-existent email (should not error)
   - [ ] ResetPassword: success, expired token, invalid token
+  - [ ] ChangePassword: success, wrong old password, weak new password
+  - [ ] VerifyEmail: success, expired token, invalid token
+  - [ ] RequestSellerUpgrade: success, already seller
 - [ ] Integration tests for handlers using `httptest`:
   - [ ] Full register → login → refresh → logout flow
   - [ ] Rate limiting on login (10 req/min/IP)
@@ -703,7 +751,7 @@
 - [ ] `CreateProductRequest` — `name`, `description`, `category_id`, `base_price` (int cents), `currency`, `metadata`
 - [ ] `UpdateProductRequest` — all fields optional (pointer types)
 - [ ] `UpdateStatusRequest` — `status` (required, oneof=draft pending active archived)
-- [ ] `ProductFilter` — `category_id`, `min_price`, `max_price`, `tags`, `sort` (price_asc, price_desc, newest), `cursor`, `limit`
+- [ ] `ProductFilter` — `category_id`, `min_price`, `max_price`, `tags` (TEXT[] overlap), `sort` (price_asc, price_desc, newest, featured), `cursor`, `limit`
 - [ ] `SearchRequest` — `q` (required, min 2 chars), `cursor`, `limit`
 - [ ] `Category` — `ID`, `Name`, `Slug`, `ParentID`, `Depth`, `Path` (ltree), `Children`
 - [ ] `CreateCategoryRequest` — `name`, `parent_id` (optional)
@@ -713,8 +761,8 @@
 
 ### Service Layer (`service.go`)
 - [ ] `ListProducts(ctx, filter) (*PaginatedProducts, error)` — query active products with filters, cursor pagination
-- [ ] `GetProductBySlug(ctx, slug) (*Product, error)` — fetch with variants and images
-- [ ] `SearchProducts(ctx, query) (*PaginatedProducts, error)` — PostgreSQL full-text search via `plainto_tsquery` on `tsvector` index
+- [ ] `GetProductBySlug(ctx, slug, includeInactive bool) (*Product, error)` — fetch with variants and images; customers see only `Active` products, admins/sellers may include inactive
+- [ ] `SearchProducts(ctx, query) (*PaginatedProducts, error)` — PostgreSQL full-text search via `plainto_tsquery` on `tsvector` index, only `Active` products for customers
 - [ ] `CreateProduct(ctx, sellerID, req) (*Product, error)` — create in Draft status, generate slug (unique, URL-safe)
 - [ ] `UpdateProduct(ctx, productID, sellerID, req) (*Product, error)` — verify ownership (seller_id match), update fields
 - [ ] `TransitionStatus(ctx, productID, adminID, req) error` — FSM validation: Draft→PendingReview→Active→Archived
@@ -735,7 +783,7 @@
 
 ### Handler Layer (`handler.go`)
 - [ ] `GET /api/v1/products` — parse query params into `ProductFilter`, call `ListProducts`, return paginated response with `next_cursor`
-- [ ] `GET /api/v1/products/:slug` — call `GetProductBySlug`, return product with variants/images
+- [ ] `GET /api/v1/products/:slug` — call `GetProductBySlug` with `includeInactive=false` for public endpoint (admins use admin endpoint if needed), return product with variants/images
 - [ ] `GET /api/v1/products/search` — parse `q` param, call `SearchProducts`, return paginated results
 - [ ] `POST /api/v1/products` — require Seller/Admin role, bind+validate, call `CreateProduct`, return 201
 - [ ] `PUT /api/v1/products/:id` — require Seller/Admin, verify ownership, call `UpdateProduct`
@@ -747,11 +795,11 @@
 
 ### Repository Layer (`repository/`)
 - [ ] `db/queries/catalog.sql` — write SQL:
-  - [ ] `ListProducts` — SELECT with WHERE filters, ORDER BY, LIMIT, cursor-based keyset pagination
-  - [ ] `GetProductBySlug` — SELECT with JOIN variants, images
-  - [ ] `SearchProducts` — SELECT with `WHERE tsvector_col @@ plainto_tsquery($1)`, rank ordering
+  - [ ] `ListProducts` — SELECT with WHERE filters (status=active, category, price range, tags overlap), ORDER BY (price_asc, price_desc, newest, featured), LIMIT, cursor-based keyset pagination
+  - [ ] `GetProductBySlug` — SELECT with JOIN variants, images; optionally filter by status
+  - [ ] `SearchProducts` — SELECT with `WHERE status='active' AND tsvector_col @@ plainto_tsquery($1)`, rank ordering
   - [ ] `CreateProduct` — INSERT returning *
-  - [ ] `UpdateProduct` — UPDATE with dynamic SET (sqlc `sqlc.narg()` for nullable fields)
+  - [ ] `UpdateProduct` — UPDATE with dynamic SET (sqlc `sqlc.narg()` for nullable fields), including tags
   - [ ] `UpdateProductStatus` — UPDATE status, updated_at
   - [ ] `SoftDeleteProduct` — UPDATE archived_at, status
   - [ ] `ListCategories` — SELECT ordered by `path` (ltree)
@@ -817,10 +865,9 @@
   - [ ] Recalculate totals
 - [ ] `ClearCart(ctx, userID, sessionID) error` — release all soft reservations, delete cart
 - [ ] `ApplyCoupon(ctx, userID, req) (*Cart, error)`:
-  - [ ] Validate coupon exists, not expired, usage limit not reached
-  - [ ] Check minimum order amount
-  - [ ] Calculate discount (percent or fixed)
-  - [ ] Apply to cart, recalculate totals
+    - [ ] Call `couponService.ValidateCoupon(code, subtotal)`
+    - [ ] Calculate discount (percent or fixed)
+    - [ ] Apply to cart, recalculate totals
 - [ ] `MergeCarts(ctx, userID, sessionID) (*Cart, error)`:
   - [ ] Fetch guest cart from Redis
   - [ ] For each guest item: check stock, merge into user cart (skip duplicates, sum quantities)
@@ -860,8 +907,6 @@
   - [ ] `ClearCartItems` — DELETE all items for cart
   - [ ] `GetCartItem` — SELECT single item for validation
   - [ ] `ApplyCouponToCart` — UPDATE coupon_code on cart
-  - [ ] `GetCouponByCode` — SELECT coupon for validation
-  - [ ] `IncrementCouponUsage` — UPDATE used_count + 1
 - [ ] Run `sqlc generate`
 
 ### Redis Operations (Guest Cart)
@@ -912,7 +957,7 @@
   - [ ] Validate shipping address belongs to user
   - [ ] For each cart item: validate stock, convert soft reservation → hard reservation
   - [ ] Compute subtotal from cart items (unit_price_snapshot * quantity)
-  - [ ] Apply coupon discount if present
+  - [ ] Apply coupon discount if present (via `couponService`)
   - [ ] Compute tax (configurable rate or 0 for v1)
   - [ ] Compute total = subtotal - discount + tax
   - [ ] Create order + order_items in a single DB transaction
@@ -920,7 +965,6 @@
   - [ ] Create initial `order_event` (status = PendingPayment)
   - [ ] Clear user's cart
   - [ ] Publish `OrderPlaced` event to event bus
-  - [ ] Enqueue payment intent creation via River job
   - [ ] Store idempotency key → order_id mapping in Redis (TTL 24h)
 - [ ] `GetOrder(ctx, userID, orderID) (*Order, error)` — fetch with items + events, verify ownership
 - [ ] `ListOrders(ctx, userID, filter) (*PaginatedOrders, error)` — cursor pagination, own orders only
@@ -942,6 +986,12 @@
   - [ ] Create `order_event` with reason
   - [ ] Publish `OrderRefundRequested` event
   - [ ] Enqueue refund review notification (River job)
+- [ ] `ProcessRefund(ctx, adminID, orderID, amount, reason) (*Order, error)`:
+  - [ ] Validate order status is `RefundRequested`
+  - [ ] Call `paymentService.Refund(orderID, amount, reason)`
+  - [ ] Transition order status to `Refunded`
+  - [ ] Create `order_event` with refund details
+  - [ ] Publish `RefundProcessed` event
 - [ ] `ListAllOrders(ctx, filter) (*PaginatedOrders, error)` — admin/seller: all orders with advanced filters
 
 ### FSM (Order Status)
@@ -967,7 +1017,10 @@
 - [ ] `PATCH /api/v1/orders/:id/cancel` — require Customer/Admin, call `CancelOrder`
 - [ ] `GET /api/v1/admin/orders` — require Admin/Seller, call `ListAllOrders`
 - [ ] `PATCH /api/v1/admin/orders/:id/status` — require Admin/Seller, call `UpdateOrderStatus`
+- [ ] `POST /api/v1/admin/orders/:id/refund` — require Admin, bind+validate refund amount/reason, call `ProcessRefund`
 - [ ] `POST /api/v1/orders/:id/refund` — require Customer, call `RequestRefund`
+- [ ] `POST /api/v1/orders/:id/payment-intent` — require Customer, verify ownership and status `PendingPayment`, call `paymentService.CreatePaymentIntent`, return simulated `client_secret`
+- [ ] `POST /api/v1/orders/:id/simulate-payment` — require Customer, verify ownership, body `{ "success": true/false }`; call `paymentService.SimulatePaymentConfirmation` or `SimulatePaymentFailure`
 
 ### Repository Layer (`repository/`)
 - [ ] `db/queries/order.sql`:
@@ -989,6 +1042,7 @@
   - [ ] FSM: all valid transitions, all invalid transitions
   - [ ] CancelOrder: from PendingPayment, from Paid (triggers refund), from Shipped (rejected)
   - [ ] RequestRefund: from Delivered, from Processing (rejected)
+  - [ ] ProcessRefund: success, amount exceeds original, invalid order status
   - [ ] Totals computation: subtotal, discount, tax, total
 - [ ] Integration tests:
   - [ ] Full order lifecycle with real DB
@@ -997,106 +1051,87 @@
 
 ---
 
-## internal/payment — Stripe/Paystack Integration, Webhooks, Refunds, Idempotency
+## internal/payment — Simulated Payment Provider (v1)
 
 ### Standards & Conventions
-- **Gin:** Webhook handler reads raw body for signature verification (NOT JSON-bound).
-- **Provider abstraction:** `PaymentProvider` interface allows swapping gateways without changing business logic.
-- **Idempotency:** All Stripe API calls include `stripe-idempotency-key` = `{order_id}:{attempt_number}`.
-- **PCI compliance:** Card data never touches NimCart servers. Stripe.js handles tokenization client-side.
+- **Simulation only:** v1 does not integrate with Stripe, Paystack, or any real gateway. All payments are simulated in-process.
+- **Provider abstraction:** `PaymentProvider` interface still exists so v2 can swap in a real gateway without changing business logic.
 - **Money:** All amounts in integer cents via `pkg/money.Money`. Currency codes ISO 4217.
 - **Events:** Publish `PaymentConfirmed`, `PaymentFailed`, `RefundProcessed` to event bus.
+- **No PCI scope:** Card data is never collected, stored, or transmitted.
 
 ### Types & DTOs
-- [ ] `Payment` — `ID`, `OrderID`, `Gateway`, `GatewayPaymentID`, `Amount` (money.Money), `Currency`, `Status`, `Metadata` (JSONB), `CreatedAt`
+- [ ] `Payment` — `ID`, `OrderID`, `Gateway` (always `simulated`), `GatewayPaymentID` (simulated UUID), `Amount` (money.Money), `Currency`, `Status`, `Metadata` (JSONB), `CreatedAt`
 - [ ] `PaymentStatus` — enum: `Pending`, `Succeeded`, `Failed`, `Refunded`, `PartiallyRefunded`
 - [ ] `PaymentProvider` interface:
-  - [ ] `CreatePaymentIntent(ctx, amount, currency, orderID, idempotencyKey) (*PaymentIntent, error)`
+  - [ ] `CreatePaymentIntent(ctx, amount, currency, orderID) (*PaymentIntent, error)`
   - [ ] `ConfirmPayment(ctx, paymentIntentID) error`
-  - [ ] `Refund(ctx, gatewayPaymentID, amount, reason, idempotencyKey) (*RefundResult, error)`
-  - [ ] `ConstructWebhookEvent(payload, signature, secret) (*WebhookEvent, error)`
-- [ ] `PaymentIntent` — `ID`, `ClientSecret`, `Amount`, `Currency`, `Status`
-- [ ] `WebhookEvent` — `Type`, `PaymentIntentID`, `Metadata`
-- [ ] `StripeProvider` — implements `PaymentProvider` using `stripe-go` SDK
-- [ ] `PaystackProvider` — implements `PaymentProvider` using Paystack API
+  - [ ] `Refund(ctx, gatewayPaymentID, amount, reason) (*RefundResult, error)`
+- [ ] `PaymentIntent` — `ID`, `ClientSecret` (simulated token), `Amount`, `Currency`, `Status`
+- [ ] `RefundResult` — `RefundID`, `Amount`, `Status`
+- [ ] `SimulatedProvider` — in-process implementation of `PaymentProvider`
 
 ### Service Layer (`service.go`)
 - [ ] `CreatePaymentIntent(ctx, orderID, amount, currency) (*PaymentIntent, error)`:
   - [ ] Validate order exists and status is `PendingPayment`
   - [ ] Check for existing payment record (idempotency)
-  - [ ] Call `provider.CreatePaymentIntent()` with idempotency key
+  - [ ] Call `simulatedProvider.CreatePaymentIntent()`
   - [ ] Create `payments` row with status `Pending`
-  - [ ] Return client secret to frontend
-- [ ] `HandleWebhook(ctx, event WebhookEvent) error`:
-  - [ ] Switch on event type:
-    - [ ] `payment_intent.succeeded` → update payment status to `Succeeded`, publish `PaymentConfirmed`, enqueue order status update to `Paid`
-    - [ ] `payment_intent.payment_failed` → update payment status to `Failed`, publish `PaymentFailed`, enqueue failure notification
-  - [ ] All webhook processing via River job for durability (retry on failure)
+  - [ ] Return simulated `client_secret` to frontend
+- [ ] `SimulatePaymentConfirmation(ctx, orderID, paymentIntentID) (*Payment, error)`:
+  - [ ] Validate payment intent belongs to order
+  - [ ] Call `simulatedProvider.ConfirmPayment()`
+  - [ ] Update payment status to `Succeeded`
+  - [ ] Publish `PaymentConfirmed` event
+  - [ ] Enqueue order status update to `Paid` via River job
+- [ ] `SimulatePaymentFailure(ctx, orderID, paymentIntentID, reason) (*Payment, error)`:
+  - [ ] Update payment status to `Failed`
+  - [ ] Publish `PaymentFailed` event
+  - [ ] Enqueue failure notification
 - [ ] `Refund(ctx, orderID, amount, reason) (*Payment, error)`:
   - [ ] Validate order status allows refund (`Paid`, `Processing`, `Delivered`)
   - [ ] Validate refund amount <= original charge
-  - [ ] Call `provider.Refund()` with idempotency key
+  - [ ] Call `simulatedProvider.Refund()`
   - [ ] Update payment status to `Refunded` or `PartiallyRefunded`
   - [ ] Publish `RefundProcessed` event
   - [ ] Enqueue order status update to `Refunded`
 - [ ] `GetPaymentByOrderID(ctx, orderID) (*Payment, error)`
 
-### Stripe Provider (`stripe_provider.go`)
-- [ ] Initialize Stripe client with secret key from config/Vault
-- [ ] `CreatePaymentIntent` — call `stripe.PaymentIntent.New()` with amount, currency, metadata
-- [ ] `ConfirmPayment` — verify PaymentIntent status
-- [ ] `Refund` — call `stripe.Refund.New()` with payment_intent, amount
-- [ ] `ConstructWebhookEvent` — call `webhook.ConstructEvent()` with `Stripe-Signature` header validation
-- [ ] Set webhook signing secret from config
+### Simulated Provider (`simulated_provider.go`)
+- [ ] `CreatePaymentIntent` — generate deterministic UUID based on order ID, return `PaymentIntent` with status `Pending`
+- [ ] `ConfirmPayment` — always succeeds in v1 (configurable failure mode for testing)
+- [ ] `Refund` — validate amount <= original, return `RefundResult` with status `Succeeded`
+- [ ] No network calls, no secrets, no webhooks
 
-### Paystack Provider (`paystack_provider.go`)
-- [ ] Initialize Paystack client with secret key
-- [ ] `CreatePaymentIntent` — call Paystack Initialize Transaction API
-- [ ] `Refund` — call Paystack Refund API
-- [ ] `ConstructWebhookEvent` — verify HMAC SHA512 signature on webhook payload
+### Handler Layer (`handler.go`)
+- [ ] `GET /api/v1/payments/:orderID` — require Customer, return payment status (basic order_id lookup; ownership validated by calling endpoint from order module in v1)
 
-### Webhook Handler (`handler.go`)
-- [ ] `POST /api/v1/webhooks/stripe`:
-  - [ ] Read raw request body (NOT `c.ShouldBindJSON`)
-  - [ ] Get `Stripe-Signature` header
-  - [ ] Call `provider.ConstructWebhookEvent(body, signature, secret)`
-  - [ ] If signature invalid: return 400
-  - [ ] Enqueue webhook processing as River job (durable, retryable)
-  - [ ] Return 200 immediately (Stripe expects quick 200)
-- [ ] `POST /api/v1/webhooks/paystack` — same pattern with HMAC verification
-
-### Payment Flow Handler
-- [ ] `POST /api/v1/payments/intent` — require Customer, create payment intent for order, return client secret
-- [ ] `GET /api/v1/payments/:orderID` — require Customer, return payment status
+> **Note:** In v1, payment intent creation and confirmation are exposed via the **order module** endpoints (`/api/v1/orders/:id/payment-intent` and `/api/v1/orders/:id/simulate-payment`) to avoid cross-module package cycles. The payment module provides the service implementation only.
 
 ### Repository Layer (`repository/`)
 - [ ] `db/queries/payment.sql`:
   - [ ] `CreatePayment` — INSERT into payments
   - [ ] `GetPaymentByOrderID` — SELECT by order_id
-  - [ ] `GetPaymentByGatewayID` — SELECT by gateway_payment_id (for webhook lookup)
   - [ ] `UpdatePaymentStatus` — UPDATE status, metadata
-  - [ ] `UpdatePaymentGatewayID` — UPDATE gateway_payment_id after intent creation
 - [ ] Run `sqlc generate`
 
 ### Tests
 - [ ] Unit tests:
   - [ ] CreatePaymentIntent: success, order not found, duplicate intent
-  - [ ] HandleWebhook: payment succeeded, payment failed, invalid signature
+  - [ ] SimulatePaymentConfirmation: success, order status update queued
+  - [ ] SimulatePaymentFailure: failure, notification queued
   - [ ] Refund: success, amount exceeds original, invalid order status
 - [ ] Integration tests:
-  - [ ] Stripe webhook with mocked signature verification
-  - [ ] Full payment flow: create intent → simulate webhook → order status update
+  - [ ] Full simulated flow: create intent → confirm → order status `Paid`
   - [ ] Refund flow: full refund, partial refund
 - [ ] Provider tests:
-  - [ ] Stripe provider with mocked HTTP client
-  - [ ] Paystack provider with mocked HTTP client
+  - [ ] Simulated provider: intent creation, confirmation, refund
 
 ### Security Checklist
-- [ ] Stripe secret key from Vault/env, never in source
-- [ ] Webhook signature verified before any processing
-- [ ] Idempotency keys on all gateway API calls
+- [ ] No real gateway secrets in config or source
+- [ ] Simulation endpoints disabled in production (`APP_ENV=production`)
 - [ ] No card data stored server-side
-- [ ] Webhook endpoint rate-limited and behind signature check only (no JWT)
+- [ ] All simulated actions still enforce order ownership
 
 ---
 
@@ -1125,9 +1160,9 @@
   - [ ] Create audit log entry (who, what, when, why)
   - [ ] Check if now below reorder threshold → publish `InventoryLowStock`
 - [ ] `CreateSoftReservation(ctx, req) error`:
-  - [ ] Check `available >= quantity` (read from DB)
-  - [ ] Store in Redis: `reservation:{session_id}:{variant_id}` = quantity, TTL 30 min
-  - [ ] Use Redis WATCH/MULTI for atomicity
+    - [ ] Check `available >= quantity` (read from DB)
+    - [ ] Store in Redis: `reservation:{session_id}:{variant_id}` = quantity, TTL 30 min
+    - [ ] Use Redis Lua script or WATCH/MULTI to atomically check DB-available vs total-soft-reserved and set the reservation (prevents race-condition overselling)
 - [ ] `ReleaseSoftReservation(ctx, sessionID, variantID) error`:
   - [ ] DEL Redis key `reservation:{session_id}:{variant_id}`
 - [ ] `ReleaseAllSoftReservations(ctx, sessionID) error`:
@@ -1204,7 +1239,9 @@
 
 ### Types & DTOs
 - [ ] `UserProfile` — `ID`, `Email`, `Name`, `AvatarURL`, `Phone`, `Role`, `Status`, `EmailVerifiedAt`, `CreatedAt`
-- [ ] `UpdateProfileRequest` — `name` (optional, min 2), `avatar_url` (optional, URL), `phone` (optional, E.164 format)
+- [ ] `UpdateProfileRequest` — `name` (optional, min 2), `phone` (optional, E.164 format)
+- [ ] `AvatarUploadResponse` — `upload_url` (presigned PUT), `image_key`, `expires_in`
+- [ ] `SellerApprovalRequest` — `status` (required, oneof=approved rejected), `notes` (optional)
 - [ ] `Address` — `ID`, `UserID`, `FullName`, `Line1`, `Line2`, `City`, `State`, `Country`, `PostalCode`, `IsDefault`, `CreatedAt`
 - [ ] `CreateAddressRequest` — `full_name` (required), `line1` (required), `line2` (optional), `city` (required), `state` (required), `country` (required, ISO 3166-1 alpha-2), `postal_code` (required), `is_default` (optional bool)
 - [ ] `UpdateAddressRequest` — all fields optional
@@ -1213,7 +1250,11 @@
 
 ### Service Layer (`service.go`)
 - [ ] `GetProfile(ctx, userID) (*UserProfile, error)` — fetch user by ID
-- [ ] `UpdateProfile(ctx, userID, req) (*UserProfile, error)` — update name, avatar, phone
+- [ ] `UpdateProfile(ctx, userID, req) (*UserProfile, error)` — update name, avatar_url, phone
+- [ ] `InitiateAvatarUpload(ctx, userID, filename, contentType) (*AvatarUploadResponse, error)` — validate MIME type (jpg/png/webp), generate S3 key, return presigned PUT URL (15 min expiry)
+- [ ] `ConfirmAvatarUpload(ctx, userID, imageKey) error` — update `avatar_url` in users table
+- [ ] `ApproveSeller(ctx, adminID, userID, notes) error` — update role to 'seller', create notification/email
+- [ ] `RejectSeller(ctx, adminID, userID, reason) error` — update status or record rejection, send email
 - [ ] `ListAddresses(ctx, userID) ([]Address, error)` — fetch all addresses for user
 - [ ] `CreateAddress(ctx, userID, req) (*Address, error)`:
   - [ ] If `is_default = true`: unset previous default address
@@ -1228,16 +1269,24 @@
   - [ ] Hard delete
 - [ ] `GetWishlist(ctx, userID) ([]WishlistItem, error)` — fetch with product details (JOIN products)
 - [ ] `AddToWishlist(ctx, userID, req) error`:
-  - [ ] Validate product exists and is active
-  - [ ] Check not already in wishlist (idempotent — no error if duplicate)
-  - [ ] INSERT wishlist entry
+    - [ ] Validate product exists and is active
+    - [ ] Check not already in wishlist (idempotent — no error if duplicate)
+    - [ ] INSERT wishlist entry
 - [ ] `RemoveFromWishlist(ctx, userID, productID) error`:
+    - [ ] Verify in wishlist
+    - [ ] DELETE
+- [ ] `ListUsers(ctx, filter) (*PaginatedUsers, error)` — admin: list all users with filters (role, status, search)
+- [ ] `GetUserByID(ctx, userID) (*UserProfile, error)` — admin: fetch any user profile
+- [ ] `UpdateUserRole(ctx, adminID, userID, role) error` — admin: change user role with audit
+- [ ] `UpdateUserStatus(ctx, adminID, userID, status, reason) error` — admin: suspend/deactivate/reactivate user
   - [ ] Verify in wishlist
   - [ ] DELETE
 
 ### Handler Layer (`handler.go`)
 - [ ] `GET /api/v1/users/profile` — require auth, call `GetProfile`
 - [ ] `PATCH /api/v1/users/profile` — require auth, bind+validate, call `UpdateProfile`
+- [ ] `POST /api/v1/users/avatar/upload` — require auth, validate filename/MIME, call `InitiateAvatarUpload`, return presigned URL
+- [ ] `POST /api/v1/users/avatar/confirm` — require auth, call `ConfirmAvatarUpload`, return 200
 - [ ] `GET /api/v1/users/addresses` — require auth, call `ListAddresses`
 - [ ] `POST /api/v1/users/addresses` — require auth, bind+validate, call `CreateAddress`, return 201
 - [ ] `PUT /api/v1/users/addresses/:id` — require auth, verify ownership, call `UpdateAddress`
@@ -1245,11 +1294,20 @@
 - [ ] `GET /api/v1/users/wishlist` — require auth, call `GetWishlist`
 - [ ] `POST /api/v1/users/wishlist` — require auth, bind+validate, call `AddToWishlist`, return 201
 - [ ] `DELETE /api/v1/users/wishlist/:productId` — require auth, call `RemoveFromWishlist`, return 204
+- [ ] `GET /api/v1/admin/users` — require Admin, parse filters, call `ListUsers`
+- [ ] `GET /api/v1/admin/users/:id` — require Admin, call `GetUserByID`
+- [ ] `PATCH /api/v1/admin/users/:id/role` — require Admin, bind+validate, call `UpdateUserRole`
+- [ ] `PATCH /api/v1/admin/users/:id/status` — require Admin, bind+validate, call `UpdateUserStatus`
+- [ ] `PATCH /api/v1/admin/users/:id/seller-approval` — require Admin, bind+validate `SellerApprovalRequest`, call `ApproveSeller` or `RejectSeller`
 
 ### Repository Layer (`repository/`)
 - [ ] `db/queries/user.sql`:
   - [ ] `GetUserByID` — SELECT full profile
   - [ ] `UpdateUserProfile` — UPDATE name, avatar_url, phone
+  - [ ] `UpdateUserAvatar` — UPDATE avatar_url
+  - [ ] `ListUsers` — SELECT with filters (role, status, search), cursor pagination
+  - [ ] `UpdateUserRole` — UPDATE role
+  - [ ] `UpdateUserStatus` — UPDATE status
   - [ ] `ListAddresses` — SELECT by user_id, ordered by is_default DESC, created_at
   - [ ] `CreateAddress` — INSERT
   - [ ] `UpdateAddress` — UPDATE fields
@@ -1265,10 +1323,13 @@
 ### Tests
 - [ ] Unit tests:
   - [ ] UpdateProfile: success, empty fields
+  - [ ] InitiateAvatarUpload: valid image, invalid MIME
+  - [ ] ApproveSeller: success, already seller
   - [ ] CreateAddress: with default, without default
   - [ ] DeleteAddress: default address (promotes next), non-default
   - [ ] AddToWishlist: success, duplicate (idempotent), product not found
   - [ ] RemoveFromWishlist: success, not in wishlist
+  - [ ] Admin user management: role change, status change
 - [ ] Integration tests:
   - [ ] Full address CRUD lifecycle
   - [ ] Wishlist add/remove with product validation
@@ -1281,11 +1342,11 @@
 ### Standards & Conventions
 - **River jobs:** All async notifications processed via River job queue for durability and retry.
 - **Email:** SendGrid (primary) or SMTP via gomail (fallback). Templates stored as HTML files.
-- **Event-driven:** Subscribes to event bus events: `OrderPlaced`, `PaymentConfirmed`, `OrderCancelled`, `PasswordResetRequested`, `ReviewSubmitted`.
+- **Event-driven:** Subscribes to event bus events: `OrderPlaced`, `PaymentConfirmed`, `OrderCancelled`, `PasswordResetRequested`, `ReviewSubmitted`, `SellerUpgradeRequested`, `SellerApproved`, `SellerRejected`.
 - **No direct imports:** Other modules never import notification directly — they publish events.
 
 ### Types & DTOs
-- [ ] `EmailType` — enum: `OrderConfirmation`, `OrderShipped`, `OrderCancelled`, `PasswordReset`, `WelcomeEmail`, `ReviewReminder`, `RefundProcessed`
+- [ ] `EmailType` — enum: `OrderConfirmation`, `OrderShipped`, `OrderCancelled`, `PasswordReset`, `WelcomeEmail`, `ReviewReminder`, `RefundProcessed`, `EmailVerification`, `SellerApproved`, `SellerRejected`
 - [ ] `EmailJob` — `To`, `Subject`, `Template`, `Data` (map for template variables)
 - [ ] `InAppNotification` — `ID`, `UserID`, `Title`, `Message`, `Type`, `Read`, `CreatedAt`
 - [ ] `NotificationEvent` — maps event bus events to notification actions
@@ -1308,8 +1369,18 @@
   - [ ] Create in-app notification: "Order #X has been cancelled"
 - [ ] `OnPasswordResetRequested(event)`:
   - [ ] Enqueue River job: send password reset email with token link
+- [ ] `OnEmailVerificationRequested(event)`:
+  - [ ] Enqueue River job: send email verification link with token
 - [ ] `OnReviewSubmitted(event)`:
   - [ ] Enqueue River job: notify admin of pending review moderation
+- [ ] `OnSellerUpgradeRequested(event)`:
+  - [ ] Enqueue River job: notify admin of pending seller approval
+- [ ] `OnSellerApproved(event)`:
+  - [ ] Enqueue River job: send seller approval email
+  - [ ] Create in-app notification: "Your seller account has been approved"
+- [ ] `OnSellerRejected(event)`:
+  - [ ] Enqueue River job: send seller rejection email with reason
+  - [ ] Create in-app notification: "Your seller request was not approved"
 - [ ] `OnOrderShipped(event)`:
   - [ ] Enqueue River job: send shipping confirmation with tracking number
 - [ ] `OnRefundProcessed(event)`:
@@ -1334,6 +1405,9 @@
 - [ ] `order_shipped.html` — tracking number, estimated delivery
 - [ ] `refund_processed.html` — refund amount, expected timeline
 - [ ] `review_reminder.html` — prompt to review purchased product
+- [ ] `email_verification.html` — verification link with token, expiry warning (24 hours)
+- [ ] `seller_approved.html` — seller account approved, next steps
+- [ ] `seller_rejected.html` — seller request rejected with reason
 
 ### Handler Layer (`handler.go`)
 - [ ] `GET /api/v1/notifications` — require auth, return unread notifications
@@ -1510,7 +1584,7 @@
 
 ### Standards & Conventions
 - **Gin:** Thin handlers. All endpoints require Admin role.
-- **sqlc:** All queries from `db/queries/coupon.sql`. Already shared with cart module's coupon validation.
+- **sqlc:** All queries from `db/queries/coupon.sql`. Cart module uses `couponService.ValidateCoupon()`; no direct repository sharing.
 - **Soft delete:** Coupons are soft-deleted via `deleted_at` — don't hard delete to preserve order history references.
 
 ### Types & DTOs
@@ -1524,6 +1598,7 @@
 - [ ] `CreateCoupon(ctx, req) (*Coupon, error)` — validate code uniqueness (uppercase, no special chars)
 - [ ] `UpdateCoupon(ctx, couponID, req) (*Coupon, error)` — code field is immutable
 - [ ] `DeleteCoupon(ctx, couponID) error` — soft delete (set `deleted_at`)
+- [ ] `ValidateCoupon(ctx, code, subtotal) (*Coupon, error)` — called by cart/order modules; checks existence, expiry, usage limit, minimum order amount
 
 ### Handler Layer (`handler.go`)
 - [ ] `GET /api/v1/admin/coupons` — require Admin, parse filter, call `ListCoupons`
@@ -1532,12 +1607,14 @@
 - [ ] `DELETE /api/v1/admin/coupons/:id` — require Admin, call `DeleteCoupon`, return 204
 
 ### Repository Layer (`repository/`)
-- [ ] `db/queries/cart.sql` (shared with cart module for coupon queries):
+- [ ] `db/queries/coupon.sql`:
   - [ ] `ListCoupons` — SELECT with type filter, `WHERE deleted_at IS NULL`, cursor pagination
   - [ ] `CreateCoupon` — INSERT
   - [ ] `UpdateCoupon` — UPDATE fields (except code and used_count)
   - [ ] `SoftDeleteCoupon` — UPDATE deleted_at = now()
   - [ ] `GetCouponByID` — SELECT by id
+  - [ ] `GetCouponByCode` — SELECT by code for validation
+  - [ ] `IncrementCouponUsage` — UPDATE used_count + 1
 - [ ] Run `sqlc generate`
 
 ### Tests
